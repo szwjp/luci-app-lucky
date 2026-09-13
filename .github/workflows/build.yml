@@ -230,9 +230,10 @@ jobs:
           archs="$BUILD_ARCHS"
 
           for a in $archs; do
-            mapfile -t files < <(find "dist/$a" -maxdepth 1 -type f \( -name '*.apk' -o -name '*.ipk' \) 2>/dev/null | sort)
+            # download-artifact creates dist/<artifact-name>, i.e. dist/lucky-<arch>
+            mapfile -t files < <(find "dist/lucky-$a" -maxdepth 1 -type f \( -name '*.apk' -o -name '*.ipk' \) 2>/dev/null | sort)
             if [ "${#files[@]}" -eq 0 ]; then
-              echo "::error::$a: 没有可上传的产物"
+              echo "::error::$a: 在 dist/lucky-$a 下没有可上传的产物"
               exit 1
             fi
 
