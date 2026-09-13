@@ -1,0 +1,232 @@
+name: Build packages
+
+# Builds lucky + luci-app-lucky as both apk (apk-tools v3) and ipk (opkg)
+# without an OpenWrt buildroot or SDK: the script stages the file tree and
+# calls `apk mkpkg` / `ipkg-build` directly.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '发布版本号，须等于 Makefile 的 PKG_VERSION-rPKG_RELEASE（如 2.27.2-r1）。留空则只构建不发布。'
+        required: false
+        type: string
+      archs:
+        description: '要构建的架构，逗号分隔（如 arm64,x86_64,mipsle_softfloat）。留空则全部。'
+        required: false
+        type: string
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  # apk-tools commit that provides `apk mkpkg` with the apk v3 (ADB) writer.
+  APK_TOOLS_REF: 'b5a31c0d865342ad80be10d68f1bb3d3ad9b0866'
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      archs: ${{ steps.list.outputs.archs }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine architecture list
+        id: list
+        run: |
+          set -euo pipefail
+          ALL="arm64 x86_64 armv7 armv6 armv5 mips_softfloat mipsle_softfloat i386"
+          WANT="${{ github.event.inputs.archs }}"
+          if [ -n "$WANT" ]; then
+            OUT=""
+            for a in ${WANT//,/ }; do
+              case " $ALL " in
+                *" $a "*) OUT="$OUT${OUT:+,}\"$a\"" ;;
+                *) echo "::error::未知架构 $a"; exit 1 ;;
+              esac
+            done
+            echo "archs=[$OUT]" >> "$GITHUB_OUTPUT"
+          else
+            JSON="$(printf '"%s",' $ALL)"
+            echo "archs=[${JSON%,}]" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Determine release version
+        id: version
+        run: |
+          set -euo pipefail
+          V="${{ github.event.inputs.version }}"
+          if [ -z "$V" ] && [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            V="${GITHUB_REF#refs/tags/v}"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ${{ fromJSON(needs.prepare.outputs.archs) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache apk-tools binary
+        id: cache-apk-tools
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/bin/apk
+          key: apk-tools-${{ env.APK_TOOLS_REF }}-${{ runner.os }}
+
+      - name: Checkout apk-tools
+        if: steps.cache-apk-tools.outputs.cache-hit != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: 'alpinelinux/apk-tools'
+          path: 'apk-tools'
+          ref: ${{ env.APK_TOOLS_REF }}
+
+      - name: Build apk-tools
+        if: steps.cache-apk-tools.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential meson ninja-build libssl-dev zlib1g-dev
+          pushd apk-tools
+          meson setup build \
+            -Dcompressed-help=false \
+            -Ddocs=disabled \
+            -Dhelp=disabled \
+            -Dlua=disabled \
+            -Ddefault_library=static \
+            -Durl_backend=wget \
+            -Dzstd=disabled \
+            -Dpython=disabled \
+            -Dtests=disabled \
+            -Dcrypto_backend=openssl
+          ninja -C build
+          sudo install -m0755 build/src/apk /usr/local/bin/apk
+          popd
+
+      - name: Install packaging helpers
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y -qq fakeroot curl
+          curl -fsSL -o /tmp/ipkg-build \
+            "https://raw.githubusercontent.com/openwrt/openwrt/master/scripts/ipkg-build"
+          sudo install -m0755 /tmp/ipkg-build /usr/local/bin/ipkg-build
+          apk --version
+          ipkg-build 2>&1 | head -1 || true
+
+      - name: Build apk + ipk
+        run: |
+          set -euo pipefail
+          ./scripts/build-pkg.sh \
+            --arch "${{ matrix.arch }}" \
+            --pkg both \
+            --prefix "${{ matrix.arch }}-" \
+            --out "$GITHUB_WORKSPACE/dist"
+
+      - name: Verify the built apk files
+        run: |
+          set -euo pipefail
+          core="dist/${{ matrix.arch }}-lucky-*.apk"
+          shopt -s nullglob
+          core=( $core )
+          if [ "${#core[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one core apk, found ${#core[@]}"
+            exit 1
+          fi
+          python3 scripts/apk-verify.py \
+            --require-file /usr/bin/lucky \
+            --require-file /etc/init.d/lucky \
+            "${core[@]}"
+          python3 scripts/apk-verify.py \
+            --arch noarch \
+            --require-file /usr/lib/lua/luci/controller/lucky.lua \
+            dist/${{ matrix.arch }}-luci-app-lucky-*.apk
+          # Every po/<lang>/lucky.po must produce an i18n package that carries
+          # its compiled catalog at the path LuCI loads it from.
+          shopt -s nullglob
+          for po in luci-app-lucky/po/*/lucky.po; do
+            lang="$(basename "$(dirname "$po")")"
+            case "$lang" in
+              zh_Hans) locale=zh-cn ;;
+              zh_Hant) locale=zh-tw ;;
+              pt_BR) locale=pt-br ;;
+              bn_BD) locale=bn ;;
+              *) locale="$(echo "$lang" | tr '[:upper:]_' '[:lower:]-')" ;;
+            esac
+            lmo="dist/${{ matrix.arch }}-luci-i18n-lucky-$locale-"*.apk
+            if [ "${#lmo[@]}" -ne 1 ]; then
+              echo "::error::$lang: expected one luci-i18n-lucky-$locale apk, found ${#lmo[@]}"
+              exit 1
+            fi
+            python3 scripts/apk-verify.py \
+              --arch noarch \
+              --name "luci-i18n-lucky-$locale" \
+              --require-file "/usr/lib/lua/luci/i18n/lucky.$locale.lmo" \
+              "${lmo[@]}"
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: lucky-${{ matrix.arch }}
+          path: |
+            dist/*.apk
+            dist/*.ipk
+
+  release:
+    needs: [prepare, build]
+    if: needs.prepare.outputs.version != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Verify version matches the Makefiles
+        run: |
+          set -euo pipefail
+          V="${{ needs.prepare.outputs.version }}"
+          MK_V="$(sed -n 's/^PKG_VERSION:=//p' lucky/Makefile | tr -d '[:space:]')"
+          MK_R="$(sed -n 's/^PKG_RELEASE:=//p' lucky/Makefile | tr -d '[:space:]')"
+          EXPECTED="${MK_V}-r${MK_R:-1}"
+          if [ "$V" != "$EXPECTED" ]; then
+            echo "::error::输入版本 $V 与 lucky/Makefile 产物版本 $EXPECTED 不一致"
+            exit 1
+          fi
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(dist/*.apk dist/*.ipk)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::没有可上传的产物"
+            exit 1
+          fi
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "已存在 v$VERSION，先删除后重新发布"
+            gh release delete "v$VERSION" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+          fi
+          gh release create "v$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "v$VERSION" \
+            --notes "lucky ${VERSION} (apk + ipk)" \
+            "${files[@]}"

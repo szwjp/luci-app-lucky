@@ -58,6 +58,43 @@ https://url21.ctfile.com/d/44547821-55537427-a5525e?p=16601
 
 
 
+## 轻量打包（无需 OpenWrt 源码树 / SDK）
+
+OpenWrt 25.12 起包管理器换成 apk，插件需要同时提供 `.apk`（apk-tools v3）和 `.ipk`（opkg）。
+`scripts/build-pkg.sh` 直接铺好文件树后调用 `apk mkpkg` / `ipkg-build`，一次产出两种格式：
+
+```sh
+# 依赖：apk-tools >= 3.0 的 apk（含 mkpkg）、ipkg-build、fakeroot、curl/wget
+scripts/build-pkg.sh --arch arm64 --pkg both --out dist
+# 只出 apk：  --pkg apk
+# 指定架构：  --arch mipsle_softfloat --prefix mipsel-
+```
+
+产物（`dist/`）：
+
+- `lucky-2.27.2-r1.apk` / `lucky_2.27.2_1_aarch64_generic.ipk`（核心包，架构相关）
+- `luci-app-lucky-2.27.2-r1.apk` / `luci-app-lucky_2.27.2_1_all.ipk`（壳包，`noarch`）
+- `luci-i18n-lucky-zh-cn-2.27.2-r1.apk` / `.ipk`（翻译包，每个 `po/<lang>/lucky.po` 一个）
+
+翻译目录由 `scripts/po2lmo.py` 编译成 `.lmo`（OpenWrt `po2lmo` 的无依赖 Python 实现，
+不需要 C 工具链或 Lua 头文件），安装到 `/usr/lib/lua/luci/i18n/lucky.<locale>.lmo`。
+`po/zh_Hans` 自动映射为 LuCI 的 `zh-cn`。
+
+校验产物结构（解析 apk v3 的 ADB 容器，不需要安装、不依赖设备）：
+
+```sh
+scripts/apk-verify.py --arch noarch --require-file /usr/bin/lucky dist/lucky-*.apk
+scripts/apk-verify.py --arch noarch \
+  --require-file /usr/lib/lua/luci/i18n/lucky.zh-cn.lmo dist/luci-i18n-lucky-*.apk
+```
+
+CI 见 `.github/workflows/build.yml`（多架构构建 + 校验 + 发布）。设备侧安装：
+
+```sh
+apk add --allow-untrusted ./lucky-2.27.2-r1.apk ./luci-app-lucky-2.27.2-r1.apk ./luci-i18n-lucky-zh-cn-2.27.2-r1.apk
+```
+
+
 ## 使用方法
    
 - 将luci-app-lucky添加至 LEDE/OpenWRT 源码的方法。

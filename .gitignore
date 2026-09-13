@@ -1,0 +1,13 @@
+# Build output
+dist/
+
+# Downloaded upstream lucky binary (scripts/build-pkg.sh --skip-download)
+lucky/lucky
+
+# macOS
+.DS_Store
+
+# Local-only documentation, never pushed (see AGENTS.md)
+Technical.md
+__pycache__/
+*.pyc
