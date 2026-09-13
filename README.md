@@ -89,17 +89,19 @@ scripts/apk-verify.py --arch noarch \
 ```
 
 CI 见 `.github/workflows/build.yml`（多架构构建 + 校验 + 发布）。`Run workflow` 无需任何输入，
-直接点即全量构建并发布 Release：
+直接点即全量构建并发布：
 
+- **每个架构一个独立 Release**，Release 列表里显示的就是架构名（`x86_64`、`arm64`、
+  `mipsle_softfloat` …），tag 为 `<arch>-<version>`
+- 每次运行会重建各架构的 release，所以列表里每个架构始终保持一条最新
 - 发布版本自动取 `lucky/Makefile` 的 `PKG_VERSION-rPKG_RELEASE`；推 `v*` tag 时以 tag 名为准
 - 版本对不上 `lucky/Makefile` 时直接失败，不会发错版本
-- Release 里每个架构一组，列出该架构的 apk/ipk 下载链接
 - 只想构建部分架构时改 `BUILD_ARCHS`；想强制指定版本时改 `RELEASE_VERSION`
 
-设备侧安装：
+设备侧安装（文件名带架构前缀，按需替换 `arm64`）：
 
 ```sh
-apk add --allow-untrusted ./lucky-2.27.2-r1.apk ./luci-app-lucky-2.27.2-r1.apk ./luci-i18n-lucky-zh-cn-2.27.2-r1.apk
+apk add --allow-untrusted ./arm64-lucky-2.27.2-r1.apk ./arm64-luci-app-lucky-2.27.2-r1.apk ./arm64-luci-i18n-lucky-zh-cn-2.27.2-r1.apk
 ```
 
 

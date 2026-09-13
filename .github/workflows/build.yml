@@ -204,8 +204,9 @@ jobs:
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
+          # One directory per artifact (lucky-<arch> -> dist/<arch>) so each
+          # architecture can be published as its own release.
           path: dist
-          merge-multiple: true
 
       - name: Verify version matches the Makefiles
         run: |
@@ -221,59 +222,53 @@ jobs:
           fi
           echo "VERSION=$V" >> "$GITHUB_ENV"
 
-      - name: Publish release
+      - name: Publish a release per architecture
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          mapfile -t files < <(find dist -maxdepth 1 -type f \( -name '*.apk' -o -name '*.ipk' \) | sort)
-          if [ "${#files[@]}" -eq 0 ]; then
-            echo "::error::没有可上传的产物"
-            exit 1
-          fi
-
-          # Group the flat asset list by architecture so the release page shows
-          # one section per architecture instead of a shuffled mix.
           archs="$BUILD_ARCHS"
-          body="$RUNNER_TEMP/notes.md"
-          {
-            echo "lucky \`${VERSION}\`，每个架构同时提供 apk（OpenWrt 25.12+，apk-tools v3）与 ipk（opkg）。"
-            echo
-            echo "文件名前缀即架构，便于对照下载。"
-            for a in $archs; do
-              list="$(printf '%s\n' "${files[@]}" | grep -E "/(${a})-.*\.(apk|ipk)$" || true)"
-              [ -n "$list" ] || continue
+
+          for a in $archs; do
+            mapfile -t files < <(find "dist/$a" -maxdepth 1 -type f \( -name '*.apk' -o -name '*.ipk' \) 2>/dev/null | sort)
+            if [ "${#files[@]}" -eq 0 ]; then
+              echo "::error::$a: 没有可上传的产物"
+              exit 1
+            fi
+
+            tag="${a}-${VERSION}"
+            body="$RUNNER_TEMP/notes-$a.md"
+            {
+              echo "lucky \`${VERSION}\` 的 **${a}** 构建。"
               echo
-              echo "### ${a}"
-              echo
-              while IFS= read -r f; do
+              for f in "${files[@]}"; do
                 b="$(basename "$f")"
                 # Absolute URL: a relative one renders as
                 # /<repo>/blob/<tag>/releases/download/... and 404s.
-                echo "- [${b}](https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/${b})"
-              done <<< "$list"
-            done
-            echo
-            echo "<details><summary>设备侧安装</summary>"
-            echo
-            echo '```sh'
-            echo "apk add --allow-untrusted ./<arch>-lucky-${VERSION}.apk ./<arch>-luci-app-lucky-${VERSION}.apk ./<arch>-luci-i18n-lucky-zh-cn-${VERSION}.apk"
-            echo "# 或 opkg install ./<arch>-lucky_*_<ipk-arch>.ipk ..."
-            echo '```'
-            echo
-            echo "</details>"
-          } > "$body"
-          cat "$body"
+                echo "- [${b}](https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/${b})"
+              done
+              echo
+              echo "<details><summary>设备侧安装</summary>"
+              echo
+              echo '```sh'
+              echo "apk add --allow-untrusted ./${a}-lucky-${VERSION}.apk ./${a}-luci-app-lucky-${VERSION}.apk ./${a}-luci-i18n-lucky-zh-cn-${VERSION}.apk"
+              echo "# 或 opkg install ./${a}-lucky_*_<ipk-arch>.ipk ..."
+              echo '```'
+              echo
+              echo "</details>"
+            } > "$body"
+            cat "$body"
 
-          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            # Braces are required before the full-width comma: bash otherwise
-            # treats the multibyte character as part of the variable name and
-            # aborts with "VERSION: unbound variable" under set -u.
-            echo "已存在 v${VERSION}，先删除后重新发布"
-            gh release delete "v$VERSION" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
-          fi
-          gh release create "v$VERSION" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "v$VERSION" \
-            --notes-file "$body" \
-            "${files[@]}"
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              # Braces are required before the full-width comma: bash otherwise
+              # treats the multibyte character as part of the variable name and
+              # aborts with "tag: unbound variable" under set -u.
+              echo "已存在 ${tag}，先删除后重新发布"
+              gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+            fi
+            gh release create "$tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$a" \
+              --notes-file "$body" \
+              "${files[@]}"
+          done
