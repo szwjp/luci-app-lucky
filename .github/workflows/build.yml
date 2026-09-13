@@ -24,10 +24,9 @@ env:
   # Architectures built by every run. Edit this line to narrow a manual run.
   BUILD_ARCHS: 'arm64 x86_64 armv7 armv6 armv5 mips_softfloat mipsle_softfloat i386'
 
-  # Leave empty to build and upload artifacts only. Set it to the released
-  # version (e.g. 2.27.2-r1, equal to PKG_VERSION-rPKG_RELEASE in
-  # lucky/Makefile) to also publish a GitHub release. Pushing a v* tag sets it
-  # automatically from the tag name, overriding this value.
+  # Every run publishes a release. The version is derived from lucky/Makefile
+  # as PKG_VERSION-rPKG_RELEASE. Set this only to force a different version;
+  # pushing a v* tag overrides it with the tag name.
   RELEASE_VERSION: ''
 
 jobs:
@@ -37,6 +36,8 @@ jobs:
       archs: ${{ steps.list.outputs.archs }}
       version: ${{ steps.version.outputs.version }}
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
       - name: Resolve build matrix
         id: list
         run: |
@@ -49,16 +50,21 @@ jobs:
         id: version
         run: |
           set -euo pipefail
-          v="$RELEASE_VERSION"
+          # Default to the version the packages themselves carry, so a plain
+          # Run workflow produces a release instead of silently skipping it.
+          mk_v="$(sed -n 's/^PKG_VERSION:=//p' lucky/Makefile | tr -d '[:space:]')"
+          mk_r="$(sed -n 's/^PKG_RELEASE:=//p' lucky/Makefile | tr -d '[:space:]')"
+          derived="${mk_v}-r${mk_r:-1}"
+          v="${RELEASE_VERSION:-$derived}"
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             v="${GITHUB_REF#refs/tags/v}"
           fi
-          echo "version=$v" >> "$GITHUB_OUTPUT"
-          if [ -n "$v" ]; then
-            echo "本次运行会发布 release v$v"
-          else
-            echo "只构建并上传 artifact，不发布 release"
+          if [ -z "$v" ]; then
+            echo "::error::无法确定发布版本（lucky/Makefile 里没有 PKG_VERSION）"
+            exit 1
           fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "本次运行将发布 release v$v"
 
   build:
     needs: prepare
@@ -68,18 +74,18 @@ jobs:
       matrix:
         arch: ${{ fromJSON(needs.prepare.outputs.archs) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Cache apk-tools binary
         id: cache-apk-tools
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: /usr/local/bin/apk
           key: apk-tools-${{ env.APK_TOOLS_REF }}-${{ runner.os }}
 
       - name: Checkout apk-tools
         if: steps.cache-apk-tools.outputs.cache-hit != 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: 'alpinelinux/apk-tools'
           path: 'apk-tools'
@@ -183,7 +189,7 @@ jobs:
           done
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: lucky-${{ matrix.arch }}
           path: |
@@ -192,12 +198,11 @@ jobs:
 
   release:
     needs: [prepare, build]
-    if: needs.prepare.outputs.version != ''
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist
           merge-multiple: true
@@ -205,12 +210,13 @@ jobs:
       - name: Verify version matches the Makefiles
         run: |
           set -euo pipefail
+          ls -l dist
           V="${{ needs.prepare.outputs.version }}"
           MK_V="$(sed -n 's/^PKG_VERSION:=//p' lucky/Makefile | tr -d '[:space:]')"
           MK_R="$(sed -n 's/^PKG_RELEASE:=//p' lucky/Makefile | tr -d '[:space:]')"
           EXPECTED="${MK_V}-r${MK_R:-1}"
           if [ "$V" != "$EXPECTED" ]; then
-            echo "::error::RELEASE_VERSION/tag 版本 $V 与 lucky/Makefile 产物版本 $EXPECTED 不一致"
+            echo "::error::发布版本 $V 与 lucky/Makefile 产物版本 $EXPECTED 不一致"
             exit 1
           fi
           echo "VERSION=$V" >> "$GITHUB_ENV"
@@ -220,12 +226,42 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          files=(dist/*.apk dist/*.ipk)
+          mapfile -t files < <(find dist -maxdepth 1 -type f \( -name '*.apk' -o -name '*.ipk' \) | sort)
           if [ "${#files[@]}" -eq 0 ]; then
             echo "::error::没有可上传的产物"
             exit 1
           fi
+
+          # Group the flat asset list by architecture so the release page shows
+          # one section per architecture instead of a shuffled mix.
+          archs="$BUILD_ARCHS"
+          body="$RUNNER_TEMP/notes.md"
+          {
+            echo "lucky \`${VERSION}\`，每个架构同时提供 apk（OpenWrt 25.12+，apk-tools v3）与 ipk（opkg）。"
+            echo
+            echo "文件名前缀即架构，便于对照下载。"
+            for a in $archs; do
+              list="$(printf '%s\n' "${files[@]}" | grep -E "/(${a})-.*\.(apk|ipk)$" || true)"
+              [ -n "$list" ] || continue
+              echo
+              echo "### ${a}"
+              echo
+              while IFS= read -r f; do
+                echo "- [$(basename "$f")](${RELEASE_URL_PREFIX:-}releases/download/v${VERSION}/$(basename "$f"))"
+              done <<< "$list"
+            done
+            echo
+            echo "<details><summary>设备侧安装</summary>"
+            echo
+            echo '```sh'
+            echo "apk add --allow-untrusted ./<arch>-lucky-${VERSION}.apk ./<arch>-luci-app-lucky-${VERSION}.apk ./<arch>-luci-i18n-lucky-zh-cn-${VERSION}.apk"
+            echo "# 或 opkg install ./<arch>-lucky_*_<ipk-arch>.ipk ..."
+            echo '```'
+            echo
+            echo "</details>"
+          } > "$body"
+          cat "$body"
+
           if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "已存在 v$VERSION，先删除后重新发布"
             gh release delete "v$VERSION" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
@@ -233,5 +269,5 @@ jobs:
           gh release create "v$VERSION" \
             --repo "$GITHUB_REPOSITORY" \
             --title "v$VERSION" \
-            --notes "lucky ${VERSION} (apk + ipk)" \
+            --notes-file "$body" \
             "${files[@]}"
