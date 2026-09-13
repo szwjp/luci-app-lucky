@@ -88,7 +88,15 @@ scripts/apk-verify.py --arch noarch \
   --require-file /usr/lib/lua/luci/i18n/lucky.zh-cn.lmo dist/luci-i18n-lucky-*.apk
 ```
 
-CI 见 `.github/workflows/build.yml`（多架构构建 + 校验 + 发布）。设备侧安装：
+CI 见 `.github/workflows/build.yml`（多架构构建 + 校验 + 发布）。`Run workflow` 无需任何输入，
+直接点即全量构建；发布与否由 workflow 顶部的 `RELEASE_VERSION` 控制：
+
+- `RELEASE_VERSION: ''` → 只构建并上传 artifact
+- `RELEASE_VERSION: '2.27.2-r1'`（须等于 `lucky/Makefile` 的 `PKG_VERSION-rPKG_RELEASE`）→ 构建后发 Release
+- 推 `v2.27.2-r1` 形式的 tag 时，版本自动取 tag 名并覆盖该变量
+- 只想构建部分架构时，改 `BUILD_ARCHS` 那一行
+
+设备侧安装：
 
 ```sh
 apk add --allow-untrusted ./lucky-2.27.2-r1.apk ./luci-app-lucky-2.27.2-r1.apk ./luci-i18n-lucky-zh-cn-2.27.2-r1.apk

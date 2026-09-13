@@ -6,15 +6,6 @@ name: Build packages
 
 on:
   workflow_dispatch:
-    inputs:
-      version:
-        description: '发布版本号，须等于 Makefile 的 PKG_VERSION-rPKG_RELEASE（如 2.27.2-r1）。留空则只构建不发布。'
-        required: false
-        type: string
-      archs:
-        description: '要构建的架构，逗号分隔（如 arm64,x86_64,mipsle_softfloat）。留空则全部。'
-        required: false
-        type: string
   push:
     tags:
       - 'v*'
@@ -30,6 +21,15 @@ env:
   # apk-tools commit that provides `apk mkpkg` with the apk v3 (ADB) writer.
   APK_TOOLS_REF: 'b5a31c0d865342ad80be10d68f1bb3d3ad9b0866'
 
+  # Architectures built by every run. Edit this line to narrow a manual run.
+  BUILD_ARCHS: 'arm64 x86_64 armv7 armv6 armv5 mips_softfloat mipsle_softfloat i386'
+
+  # Leave empty to build and upload artifacts only. Set it to the released
+  # version (e.g. 2.27.2-r1, equal to PKG_VERSION-rPKG_RELEASE in
+  # lucky/Makefile) to also publish a GitHub release. Pushing a v* tag sets it
+  # automatically from the tag name, overriding this value.
+  RELEASE_VERSION: ''
+
 jobs:
   prepare:
     runs-on: ubuntu-latest
@@ -37,37 +37,28 @@ jobs:
       archs: ${{ steps.list.outputs.archs }}
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Determine architecture list
+      - name: Resolve build matrix
         id: list
         run: |
           set -euo pipefail
-          ALL="arm64 x86_64 armv7 armv6 armv5 mips_softfloat mipsle_softfloat i386"
-          WANT="${{ github.event.inputs.archs }}"
-          if [ -n "$WANT" ]; then
-            OUT=""
-            for a in ${WANT//,/ }; do
-              case " $ALL " in
-                *" $a "*) OUT="$OUT${OUT:+,}\"$a\"" ;;
-                *) echo "::error::未知架构 $a"; exit 1 ;;
-              esac
-            done
-            echo "archs=[$OUT]" >> "$GITHUB_OUTPUT"
-          else
-            JSON="$(printf '"%s",' $ALL)"
-            echo "archs=[${JSON%,}]" >> "$GITHUB_OUTPUT"
-          fi
+          json="$(printf '"%s",' $BUILD_ARCHS)"
+          echo "archs=[${json%,}]" >> "$GITHUB_OUTPUT"
+          echo "架构: $BUILD_ARCHS"
 
-      - name: Determine release version
+      - name: Resolve release version
         id: version
         run: |
           set -euo pipefail
-          V="${{ github.event.inputs.version }}"
-          if [ -z "$V" ] && [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            V="${GITHUB_REF#refs/tags/v}"
+          v="$RELEASE_VERSION"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            v="${GITHUB_REF#refs/tags/v}"
           fi
-          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          if [ -n "$v" ]; then
+            echo "本次运行会发布 release v$v"
+          else
+            echo "只构建并上传 artifact，不发布 release"
+          fi
 
   build:
     needs: prepare
@@ -205,7 +196,7 @@ jobs:
           MK_R="$(sed -n 's/^PKG_RELEASE:=//p' lucky/Makefile | tr -d '[:space:]')"
           EXPECTED="${MK_V}-r${MK_R:-1}"
           if [ "$V" != "$EXPECTED" ]; then
-            echo "::error::输入版本 $V 与 lucky/Makefile 产物版本 $EXPECTED 不一致"
+            echo "::error::RELEASE_VERSION/tag 版本 $V 与 lucky/Makefile 产物版本 $EXPECTED 不一致"
             exit 1
           fi
           echo "VERSION=$V" >> "$GITHUB_ENV"
