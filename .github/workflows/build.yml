@@ -129,25 +129,37 @@ jobs:
       - name: Verify the built apk files
         run: |
           set -euo pipefail
-          core="dist/${{ matrix.arch }}-lucky-*.apk"
-          shopt -s nullglob
-          core=( $core )
+          # With `set -u`, expanding a glob that matches nothing aborts with a
+          # misleading "unbound variable" error, so resolve matches explicitly
+          # through compgen and report a real message when a file is missing.
+          ls -l dist
+          match() { compgen -G "$1" || true; }
+          core=()
+          while IFS= read -r f; do [ -n "$f" ] && core+=("$f"); done \
+            < <(match "dist/${{ matrix.arch }}-lucky-*.apk")
           if [ "${#core[@]}" -ne 1 ]; then
-            echo "::error::expected exactly one core apk, found ${#core[@]}"
+            echo "::error::expected exactly one core apk for ${{ matrix.arch }}, found ${#core[@]}"
             exit 1
           fi
           python3 scripts/apk-verify.py \
             --require-file /usr/bin/lucky \
             --require-file /etc/init.d/lucky \
             "${core[@]}"
+          luci=()
+          while IFS= read -r f; do [ -n "$f" ] && luci+=("$f"); done \
+            < <(match "dist/${{ matrix.arch }}-luci-app-lucky-*.apk")
+          if [ "${#luci[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one luci-app-lucky apk for ${{ matrix.arch }}, found ${#luci[@]}"
+            exit 1
+          fi
           python3 scripts/apk-verify.py \
             --arch noarch \
             --require-file /usr/lib/lua/luci/controller/lucky.lua \
-            dist/${{ matrix.arch }}-luci-app-lucky-*.apk
+            "${luci[@]}"
           # Every po/<lang>/lucky.po must produce an i18n package that carries
           # its compiled catalog at the path LuCI loads it from.
-          shopt -s nullglob
           for po in luci-app-lucky/po/*/lucky.po; do
+            [ -f "$po" ] || continue
             lang="$(basename "$(dirname "$po")")"
             case "$lang" in
               zh_Hans) locale=zh-cn ;;
@@ -156,16 +168,18 @@ jobs:
               bn_BD) locale=bn ;;
               *) locale="$(echo "$lang" | tr '[:upper:]_' '[:lower:]-')" ;;
             esac
-            lmo="dist/${{ matrix.arch }}-luci-i18n-lucky-$locale-"*.apk
-            if [ "${#lmo[@]}" -ne 1 ]; then
-              echo "::error::$lang: expected one luci-i18n-lucky-$locale apk, found ${#lmo[@]}"
+            i18n=()
+            while IFS= read -r f; do [ -n "$f" ] && i18n+=("$f"); done \
+              < <(match "dist/${{ matrix.arch }}-luci-i18n-lucky-$locale-*.apk")
+            if [ "${#i18n[@]}" -ne 1 ]; then
+              echo "::error::$lang: expected one luci-i18n-lucky-$locale apk for ${{ matrix.arch }}, found ${#i18n[@]}"
               exit 1
             fi
             python3 scripts/apk-verify.py \
               --arch noarch \
               --name "luci-i18n-lucky-$locale" \
               --require-file "/usr/lib/lua/luci/i18n/lucky.$locale.lmo" \
-              "${lmo[@]}"
+              "${i18n[@]}"
           done
 
       - name: Upload artifacts
